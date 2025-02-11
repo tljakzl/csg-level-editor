@@ -25,10 +25,24 @@
 #include <algorithm>
 #include <memory>
 
+#include <unordered_map>
+#include <optional>
+
 // CGAL типы
 typedef CGAL::Simple_cartesian<double> Kernel;
 typedef CGAL::Surface_mesh<Kernel::Point_3> CGAL_Mesh;
 namespace PMP = CGAL::Polygon_mesh_processing;
+
+// Класс слоя сцены
+class SceneLayer {
+public:
+    std::string name = "Layer";
+    bool visible = true;
+    bool locked = false;
+    ImColor color = ImColor(255, 255, 255);
+
+    SceneLayer(const std::string& name) : name(name) {}
+};
 
 // Класс меша с интеграцией CGAL и OpenGL
 class Mesh {
@@ -175,10 +189,36 @@ public:
     Transform transform;
     bool selected = false;
     bool isOperationResult = false; // Для автоматически созданных объектов
+    int layer = 0;
 
     SceneObject(Mesh&& m) : mesh(std::move(m)) {}
     void updateTransform() {
         mesh.transform = transform.matrix();
+    }
+};
+
+// Класс группы объектов
+class ObjectGroup {
+public:
+    std::string name = "Group";
+    std::vector<SceneObject*> objects;
+    glm::mat4 transform = glm::mat4(1.0f);
+
+    void applyTransform() {
+        for (auto obj : objects) {
+            obj->mesh.transform = transform * obj->transform.matrix();
+        }
+    }
+
+private:
+    std::unordered_map<SceneObject*, glm::mat4> localTransforms;
+
+    void captureTransforms() {
+        localTransforms.clear();
+        const glm::mat4 invGroupTransform = glm::inverse(transform);
+        for (auto obj : objects) {
+            localTransforms[obj] = invGroupTransform * obj->mesh.transform;
+        }
     }
 };
 
@@ -187,9 +227,19 @@ class Scene {
 public:
     std::vector<std::unique_ptr<SceneObject>> objects;
     SceneObject* selectedObject = nullptr;
+    std::vector<SceneLayer> layers;
+    std::vector<ObjectGroup> groups;
+    int selectedLayer = 0;
+
+    Scene() {
+        layers.emplace_back("Default");
+        layers.emplace_back("Walls");
+        layers.emplace_back("Lighting");
+    }
 
     void addObject(Mesh&& mesh) {
         objects.emplace_back(std::make_unique<SceneObject>(std::move(mesh)));
+        objects.back()->layer = selectedLayer;
     }
 
     void deleteSelected() {
@@ -290,6 +340,56 @@ void initImGui(GLFWwindow* window);
 void createCube(Mesh& mesh, float size = 1.0f);
 void handleGizmo(SceneObject& obj, const glm::mat4& view, const glm::mat4& proj);
 
+// Окно управления слоями
+void drawLayerManager(Scene& scene) {
+    ImGui::Begin("Layer Manager");
+
+    // Список слоёв
+    for (size_t i = 0; i < scene.layers.size(); ++i) {
+        auto& layer = scene.layers[i];
+        ImGui::PushID(i);
+
+        // Выбор слоя
+        if (ImGui::Selectable("##select", scene.selectedLayer == i)) {
+            scene.selectedLayer = i;
+        }
+        ImGui::SameLine();
+
+        // Видимость
+        bool visible = layer.visible;
+        if (ImGui::Checkbox("##visible", &visible)) {
+            layer.visible = visible;
+        }
+        ImGui::SameLine();
+
+        // Цвет
+        ImGui::ColorEdit3("##color", (float*)&layer.color,
+            ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+        ImGui::SameLine();
+
+        // Название
+        char buf[64];
+        strcpy(buf, layer.name.c_str());
+        if (ImGui::InputText("##name", buf, sizeof(buf))) {
+            layer.name = buf;
+        }
+
+        ImGui::PopID();
+    }
+
+    // Управление слоями
+    if (ImGui::Button("Add Layer")) {
+        scene.layers.emplace_back("New Layer");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Remove Layer") && scene.layers.size() > 1) {
+        scene.layers.erase(scene.layers.begin() + scene.selectedLayer);
+        scene.selectedLayer = std::max(0, scene.selectedLayer - 1);
+    }
+
+    ImGui::End();
+}
+
 // Новое окно свойств
 void drawPropertiesWindow(Scene& scene) {
     ImGui::Begin("Object Properties");
@@ -326,6 +426,42 @@ void drawPropertiesWindow(Scene& scene) {
 
         ImGui::SameLine();
         ImGui::Checkbox("Visible", &obj.mesh.visible);
+
+        // Выбор слоя
+        int layer = scene.selectedObject->layer;
+        if (ImGui::Combo("Layer", &layer,
+            [](void* data, int idx, const char** out_text) {
+                auto& layers = *static_cast<std::vector<SceneLayer>*>(data);
+                *out_text = layers[idx].name.c_str();
+                return true;
+            }, &scene.layers, scene.layers.size()))
+        {
+            scene.selectedObject->layer = layer;
+        }
+
+        // Управление группами
+        if (ImGui::TreeNode("Grouping")) {
+            static char groupName[64] = "NewGroup";
+            ImGui::InputText("Group Name", groupName, sizeof(groupName));
+
+            if (ImGui::Button("Create Group")) {
+                scene.groups.emplace_back();
+                scene.groups.back().name = groupName;
+            }
+
+            // Присоединение к группе
+            for (auto& group : scene.groups) {
+                bool inGroup = std::find(group.objects.begin(), group.objects.end(),
+                    scene.selectedObject) != group.objects.end();
+
+                if (ImGui::Checkbox(group.name.c_str(), &inGroup)) {
+                    if (inGroup) group.objects.push_back(scene.selectedObject);
+                    else group.objects.erase(std::remove(group.objects.begin(),
+                        group.objects.end(), scene.selectedObject), group.objects.end());
+                }
+            }
+            ImGui::TreePop();
+        }
     }
     else {
         ImGui::Text("Select an object to edit properties");
@@ -354,11 +490,17 @@ int main() {
     Scene scene;
     //scene.addObject(std::move(cube));
 
-    // Новая функция рендеринга
+// Обновлённый рендеринг с учётом слоёв
     auto renderScene = [&](const glm::mat4& viewProj) {
-        for (auto& obj : scene.objects) {
-            if (obj->isOperationResult) continue;
-            obj->mesh.render(viewProj);
+        for (auto& layer : scene.layers) {
+            if (!layer.visible) continue;
+
+            for (auto& obj : scene.objects) {
+                if (obj->layer != &layer - &scene.layers[0]) continue;
+                if (!obj->mesh.visible) continue;
+
+                obj->mesh.render(viewProj);
+            }
         }
         };
 
@@ -404,6 +546,8 @@ int main() {
 
         // Окно свойств
         drawPropertiesWindow(scene);
+        drawLayerManager(scene);
+        //drawGroupManager(scene); // Аналогично layer manager
 
         // Окно вьюпорта
         ImGui::Begin("Viewport", nullptr, 
