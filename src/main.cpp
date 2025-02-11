@@ -19,7 +19,7 @@
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
 #include <CGAL/Polygon_mesh_processing/corefinement.h>
-#include <CGAL/Polygon_mesh_processing/remesh.h>
+//#include <CGAL/Polygon_mesh_processing/boolean_operations.h>
 #include <vector>
 #include <iostream>
 #include <algorithm>
@@ -283,53 +283,47 @@ public:
 // Обновленная секция CSG операций
 class CSGOperations {
 public:
-    static bool difference(Scene& scene, SceneObject* A, SceneObject* B) {
+    static bool difference(Mesh& A, const Mesh& B) {
         try {
-            Mesh result;
+            // Создаем копии мешей для операции
+            CGAL_Mesh meshA = A.cgal_mesh;
+            CGAL_Mesh meshB = B.cgal_mesh;
 
-            // Применяем трансформации к мешам
-            CGAL_Mesh meshA = applyTransform(A->mesh);
-            CGAL_Mesh meshB = applyTransform(B->mesh);
+            // Применяем трансформации
+            applyTransform(meshA, A.transform);
+            applyTransform(meshB, B.transform);
 
-            //CGAL::Corefinement::Difference differ;
-            if (PMP::corefine_and_compute_difference(meshA, meshB, result.cgal_mesh)) {
-                result.uploadToGPU();
-                result.color = glm::vec3(0.4f, 0.8f, 0.6f);
-                scene.addObject(std::move(result));
+            // Выполняем булеву операцию
+            CGAL_Mesh result;
+            bool success = PMP::corefine_and_compute_difference(
+                meshA,
+                meshB,
+                result,
+                PMP::parameters::default_values(),
+                PMP::parameters::default_values(),
+                PMP::parameters::default_values()
+            );
 
-                // Помечаем исходные объекты для удаления
-                A->isOperationResult = true;
-                B->isOperationResult = true;
+            if (success) {
+                A.cgal_mesh = std::move(result);
+                A.uploadToGPU();
                 return true;
             }
         }
-        catch (...) {
-            std::cerr << "CSG operation failed\n";
+        catch (const std::exception& e) {
+            std::cerr << "CSG Error: " << e.what() << "\n";
         }
         return false;
     }
 
 private:
-    static CGAL_Mesh applyTransform(const Mesh& mesh) {
-        CGAL_Mesh result;
-        glm::mat4 invTransform = glm::inverse(mesh.transform);
-
-        for (auto v : mesh.cgal_mesh.vertices()) {
-            auto p = mesh.cgal_mesh.point(v);
+    static void applyTransform(CGAL_Mesh& mesh, const glm::mat4& transform) {
+        for (auto v : mesh.vertices()) {
+            auto p = mesh.point(v);
             glm::vec4 pos(p.x(), p.y(), p.z(), 1.0f);
-            pos = invTransform * pos;
-            result.add_vertex(Kernel::Point_3(pos.x, pos.y, pos.z));
+            pos = transform * pos;
+            mesh.point(v) = Kernel::Point_3(pos.x, pos.y, pos.z);
         }
-
-        // Копируем топологию
-        for (auto f : mesh.cgal_mesh.faces()) {
-            std::vector<CGAL_Mesh::Vertex_index> vertices;
-            for (auto v : mesh.cgal_mesh.vertices_around_face(mesh.cgal_mesh.halfedge(f))) {
-                vertices.push_back(v);
-            }
-            result.add_face(vertices);
-        }
-        return result;
     }
 };
 
@@ -488,7 +482,6 @@ int main() {
     );
 
     Scene scene;
-    //scene.addObject(std::move(cube));
 
 // Обновлённый рендеринг с учётом слоёв
     auto renderScene = [&](const glm::mat4& viewProj) {
@@ -560,7 +553,7 @@ int main() {
             // Для демо - вычитаем первый попавшийся объект
             for (auto& obj : scene.objects) {
                 if (obj.get() != scene.selectedObject && !obj->isOperationResult) {
-                    if (CSGOperations::difference(scene, scene.selectedObject, obj.get())) {
+                    if (CSGOperations::difference(obj.get()->mesh, scene.selectedObject->mesh)) {
                         scene.deleteSelected(); // Удаляем оригиналы
                         break;
                     }
