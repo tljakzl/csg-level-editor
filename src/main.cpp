@@ -13,6 +13,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
+#include <glm/gtc/matrix_inverse.hpp >
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Surface_mesh.h>
 //#include <CGAL/draw_surface_mesh.h>
@@ -20,6 +21,7 @@
 #include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
 #include <CGAL/Polygon_mesh_processing/corefinement.h>
 //#include <CGAL/Polygon_mesh_processing/boolean_operations.h>
+#include <CGAL/Bbox_3.h>
 #include <vector>
 #include <iostream>
 #include <algorithm>
@@ -47,14 +49,57 @@ public:
 // Класс меша с интеграцией CGAL и OpenGL
 class Mesh {
 public:
+    struct Vertex {
+        glm::vec3 position;
+        glm::vec3 normal;
+        glm::vec2 texCoord;
+    };
+
     CGAL_Mesh cgal_mesh;
-    GLuint vao = 0, vbo = 0;
+    GLuint vao = 0, vbo = 0, ebo = 0;
     glm::mat4 transform = glm::mat4(1.0f);
     glm::vec3 color = glm::vec3(1.0f);
     bool visible = true;
 
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec2> texCoords;
+
+    void generateNormals() {
+        normals.clear();
+        normals.resize(cgal_mesh.number_of_vertices(), glm::vec3(0));
+        using Vertexx = CGAL_Mesh::Vertex_index;
+        // 1. Вычисляем нормали для каждой грани
+        for (auto face : cgal_mesh.faces()) {
+            // Получаем вершины грани
+            std::vector<Vertexx> face_vertices;
+            for (auto v : cgal_mesh.vertices_around_face(cgal_mesh.halfedge(face))) {
+                face_vertices.push_back(v);
+            }
+
+            // Вычисляем нормаль грани
+            Kernel::Point_3 p0 = cgal_mesh.point(face_vertices[0]);
+            Kernel::Point_3 p1 = cgal_mesh.point(face_vertices[1]);
+            Kernel::Point_3 p2 = cgal_mesh.point(face_vertices[2]);
+
+            glm::vec3 v0(p1.x() - p0.x(), p1.y() - p0.y(), p1.z() - p0.z());
+            glm::vec3 v1(p2.x() - p0.x(), p2.y() - p0.y(), p2.z() - p0.z());
+            glm::vec3 face_normal = glm::normalize(glm::cross(v0, v1));
+
+            // Добавляем нормаль к вершинам
+            for (auto v : face_vertices) {
+                size_t idx = v;
+                normals[idx] += face_normal;
+            }
+        }
+
+        // 2. Нормализуем и усредняем
+        for (auto& n : normals) {
+            n = glm::normalize(n);
+        }
+    }
+
     void uploadToGPU() {
-        std::vector<float> vertexData;
+        //std::vector<float> vertexData;
 
         if (!CGAL::is_triangle_mesh(cgal_mesh))
             std::cout << "Input mesh is not triangulated." << std::endl;
@@ -65,43 +110,86 @@ public:
 
         std::cout << "number_of_faces: " << cgal_mesh.number_of_faces() << std::endl;
         std::cout << "number_of_vertices: " << cgal_mesh.number_of_vertices() << std::endl;
-        
-        // Собираем данные вершин
-        for(auto f : cgal_mesh.faces()) {
-          
-            for (auto& v : cgal_mesh.vertices_around_face(cgal_mesh.halfedge(f)))
-            {
-                auto p = cgal_mesh.point(v);
-                //auto p = v;
-                vertexData.push_back(p.x());
-                vertexData.push_back(p.y());
-                vertexData.push_back(p.z());
-                // Базовые нормали для плоского затенения
-                vertexData.push_back(0.0f);
-                vertexData.push_back(1.0f);
-                vertexData.push_back(0.0f);
 
+        // 1. Подготовка данных
+        std::vector<Vertex> vertices;
+        std::vector<GLuint> indices;
+
+        // Заполняем вершины данными из CGAL меша
+        for (auto v : cgal_mesh.vertices()) {
+            auto p = cgal_mesh.point(v);
+            Vertex vertex;
+            vertex.position = glm::vec3(p.x(), p.y(), p.z());
+
+            // Нормаль (должны быть предварительно вычислены через generateNormals())
+            if (!normals.empty() && v.idx() < normals.size()) {
+                vertex.normal = normals[v.idx()];
+            }
+
+            // UV-координаты (должны быть предварительно сгенерированы)
+            if (!texCoords.empty() && v.idx() < texCoords.size()) {
+                vertex.texCoord = texCoords[v.idx()];
+            }
+
+            vertices.push_back(vertex);
+        }
+
+        // Генерируем индексы для экономии памяти
+        for (auto f : cgal_mesh.faces()) {
+            auto h = cgal_mesh.halfedge(f);
+            for (int i = 0; i < 3; ++i) { // Для треугольников
+                indices.push_back(cgal_mesh.source(h).idx());
+                h = cgal_mesh.next(h);
             }
         }
 
-        // Генерация OpenGL объектов
-        glGenVertexArrays(1, &vao);
-        glGenBuffers(1, &vbo);
+        // 2. Создание OpenGL объектов
+        if (vao == 0) glGenVertexArrays(1, &vao);
+        if (vbo == 0) glGenBuffers(1, &vbo);
+        if (ebo == 0) glGenBuffers(1, &ebo);
 
         glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, 
-                    vertexData.size() * sizeof(float),
-                    vertexData.data(), 
-                    GL_STATIC_DRAW);
 
-        // Атрибуты вершин (позиция + нормаль)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+        // Вершинный буфер
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+            vertices.size() * sizeof(Vertex),
+            vertices.data(),
+            GL_STATIC_DRAW);
+
+        // Индексный буфер
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+            indices.size() * sizeof(GLuint),
+            indices.data(),
+            GL_STATIC_DRAW);
+
+        // 3. Настройка атрибутов
+        // Позиция
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+            sizeof(Vertex), (void*)offsetof(Vertex, position));
+
+        // Нормаль
         glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE,
+            sizeof(Vertex), (void*)offsetof(Vertex, normal));
+
+        // UV-координаты
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE,
+            sizeof(Vertex), (void*)offsetof(Vertex, texCoord));
 
         glBindVertexArray(0);
+    }
+
+    // Генерация UV-координат (простая проекция)
+    void generateUVs() {
+        texCoords.clear();
+        for (auto v : cgal_mesh.vertices()) {
+            auto p = cgal_mesh.point(v);
+            texCoords.emplace_back(p.x(), p.y());
+        }
     }
 
     void render(const glm::mat4& viewProj) const {
@@ -109,16 +197,24 @@ public:
 
         // Шейдеры (встроенные в код для простоты)
         static const char* vertexShader = R"(
-            #version 460 core
-            layout(location = 0) in vec3 aPos;
-            layout(location = 1) in vec3 aNormal;
-            uniform mat4 uViewProj;
-            uniform mat4 uModel;
-            out vec3 vNormal;
-            void main() {
-                gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
-                vNormal = mat3(transpose(inverse(uModel))) * aNormal;
-            }
+           #version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoord;
+
+out vec3 vNormal;
+out vec2 vTexCoord;
+out vec3 vFragPos;
+
+uniform mat4 uViewProj;
+uniform mat4 uModel;
+
+void main() {
+    gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
+    vNormal = mat3(transpose(inverse(uModel))) * aNormal;
+    vTexCoord = aTexCoord;
+    vFragPos = vec3(uModel * vec4(aPos, 1.0));
+}
         )";
 
         static const char* fragmentShader = R"(
@@ -159,8 +255,14 @@ public:
         glUniform3fv(glGetUniformLocation(program, "uColor"), 
                         1, glm::value_ptr(color));
         
+        if (vao == 0) return;
+
         glBindVertexArray(vao);
-        glDrawArrays(GL_TRIANGLES, 0, cgal_mesh.number_of_vertices() * cgal_mesh.number_of_faces());
+        glDrawElements(GL_TRIANGLES,
+            cgal_mesh.number_of_faces() * 3, // 3 индекса на треугольник
+            GL_UNSIGNED_INT,
+            0);
+        glBindVertexArray(0);
     }
 };
 
@@ -190,6 +292,47 @@ public:
     bool selected = false;
     bool isOperationResult = false; // Для автоматически созданных объектов
     int layer = 0;
+
+    // Добавляем AABB для каждого объекта
+    CGAL::Bbox_3 bbox;
+
+    void updateBoundingBox() {
+        if (mesh.cgal_mesh.is_empty()) return;
+
+        auto bb = CGAL::bbox_3(mesh.cgal_mesh.points().begin(),
+            mesh.cgal_mesh.points().end());
+
+        // Применяем трансформацию объекта
+        glm::mat4 transform = mesh.transform;
+        glm::vec3 min(bb.xmin(), bb.ymin(), bb.zmin());
+        glm::vec3 max(bb.xmax(), bb.ymax(), bb.zmax());
+
+        // Трансформируем углы AABB
+        std::vector<glm::vec3> corners = {
+            glm::vec3(min.x, min.y, min.z),
+            glm::vec3(max.x, min.y, min.z),
+            glm::vec3(min.x, max.y, min.z),
+            glm::vec3(max.x, max.y, min.z),
+            glm::vec3(min.x, min.y, max.z),
+            glm::vec3(max.x, min.y, max.z),
+            glm::vec3(min.x, max.y, max.z),
+            glm::vec3(max.x, max.y, max.z)
+        };
+
+        glm::vec3 transformedMin(FLT_MAX);
+        glm::vec3 transformedMax(-FLT_MAX);
+
+        for (auto& corner : corners) {
+            glm::vec3 transformed = transform * glm::vec4(corner, 1.0f);
+            transformedMin = glm::min(transformedMin, transformed);
+            transformedMax = glm::max(transformedMax, transformed);
+        }
+
+        bbox = CGAL::Bbox_3(
+            transformedMin.x, transformedMin.y, transformedMin.z,
+            transformedMax.x, transformedMax.y, transformedMax.z
+        );
+    }
 
     SceneObject(Mesh&& m) : mesh(std::move(m)) {}
     void updateTransform() {
@@ -252,31 +395,38 @@ public:
     }
 };
 
-// Ray casting для выбора объектов
 class Ray {
 public:
     glm::vec3 origin;
     glm::vec3 direction;
 
-    static Ray fromMouse(GLFWwindow* window, const glm::mat4& view, const glm::mat4& proj) {
-        double x, y;
-        glfwGetCursorPos(window, &x, &y);
+    struct HitResult {
+        float tMin;
+        float tMax;
+    };
 
-        int width, height;
-        glfwGetWindowSize(window, &width, &height);
+    bool intersects(const CGAL::Bbox_3& bbox, HitResult* result = nullptr) const {
+        // Алгоритм Kay-Kajiya для пересечения луча и AABB
+        float tmin = -FLT_MAX, tmax = FLT_MAX;
 
-        glm::vec4 rayClip(
-            (2.0f * x) / width - 1.0f,
-            1.0f - (2.0f * y) / height,
-            -1.0f,
-            1.0f
-        );
+        for (int axis = 0; axis < 3; ++axis) {
+            float invD = 1.0f / direction[axis];
+            float t0 = (bbox.min(axis) - origin[axis]) * invD;
+            float t1 = (bbox.max(axis) - origin[axis]) * invD;
 
-        glm::vec4 rayEye = glm::inverse(proj) * rayClip;
-        rayEye = glm::vec4(rayEye.x, rayEye.y, -1.0f, 0.0f);
+            if (invD < 0.0f) std::swap(t0, t1);
 
-        glm::vec3 rayWorld = glm::vec3(glm::inverse(view) * rayEye);
-        return { glm::vec3(glm::inverse(view)[3]), glm::normalize(rayWorld) };
+            tmin = t0 > tmin ? t0 : tmin;
+            tmax = t1 < tmax ? t1 : tmax;
+
+            if (tmax < tmin) return false;
+        }
+
+        if (result) {
+            result->tMin = tmin;
+            result->tMax = tmax;
+        }
+        return true;
     }
 };
 
@@ -333,6 +483,58 @@ GLFWwindow* initGLFW();
 void initImGui(GLFWwindow* window);
 void createCube(Mesh& mesh, float size = 1.0f);
 void handleGizmo(SceneObject& obj, const glm::mat4& view, const glm::mat4& proj);
+
+void handleObjectSelection(Scene& scene, GLFWwindow* window,
+    const glm::mat4& view, const glm::mat4& projection) {
+    if (ImGui::IsMouseClicked(0) && !ImGuizmo::IsUsing() && !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow)) {
+        // Получаем позицию курсора в нормализованных координатах
+        double mouseX, mouseY;
+        glfwGetCursorPos(window, &mouseX, &mouseY);
+
+        int width, height;
+        glfwGetWindowSize(window, &width, &height);
+
+        // Преобразуем в координаты NDC
+        float x = (2.0f * mouseX) / width - 1.0f;
+        float y = 1.0f - (2.0f * mouseY) / height;
+
+        // Создаем луч из камеры
+        glm::mat4 invViewProj = glm::inverse(projection * view);
+        glm::vec4 rayStart = invViewProj * glm::vec4(x, y, -1.0f, 1.0f);
+        glm::vec4 rayEnd = invViewProj * glm::vec4(x, y, 1.0f, 1.0f);
+
+        rayStart /= rayStart.w;
+        rayEnd /= rayEnd.w;
+
+        Ray ray;
+        ray.origin = glm::vec3(rayStart);
+        ray.direction = glm::normalize(glm::vec3(rayEnd - rayStart));
+
+        // Поиск пересечений
+        SceneObject* closestObject = nullptr;
+        float closestT = FLT_MAX;
+
+        for (auto& obj : scene.objects) {
+            obj->updateBoundingBox();
+
+            Ray::HitResult hit;
+            if (ray.intersects(obj->bbox, &hit)) {
+                if (hit.tMin < closestT && hit.tMin > 0.0f) {
+                    closestT = hit.tMin;
+                    closestObject = obj.get();
+                }
+            }
+        }
+
+        scene.selectedObject = closestObject;
+
+        // Отладочный вывод
+        if (closestObject) {
+            std::cout << "Selected object at t = " << closestT
+                << ", BBox: " << closestObject->bbox << "\n";
+        }
+    }
+}
 
 // Окно управления слоями
 void drawLayerManager(Scene& scene) {
@@ -467,7 +669,7 @@ void drawPropertiesWindow(Scene& scene) {
 int main() {
     GLFWwindow* window = initGLFW();
     initImGui(window);
-    
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     // Камера
     glm::mat4 view = glm::lookAt(
         glm::vec3(5,5,5), 
@@ -508,24 +710,6 @@ int main() {
         ImGui::NewFrame();
         ImGuizmo::BeginFrame();
 
-        // Обработка выбора объектов
-        if (ImGui::IsMouseClicked(0) && ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow)) {
-            Ray ray = Ray::fromMouse(window, view, proj);
-
-            float minDist = FLT_MAX;
-            for (auto& obj : scene.objects) {
-                if (obj->isOperationResult) continue;
-
-                // Простая проверка AABB
-                glm::vec3 objPos(obj->mesh.transform[3]);
-                float dist = glm::distance(ray.origin, objPos);
-                if (dist < minDist) {
-                    scene.selectedObject = obj.get();
-                    minDist = dist;
-                }
-            }
-        }
-
         // Окно редактора
         ImGui::Begin("CSG Editor");
         if (ImGui::Button("Add Cube")) {
@@ -563,12 +747,21 @@ int main() {
         ImGui::End();
 
         // Рендеринг
-        renderScene(proj * view);
+        
         if (scene.selectedObject) {
             handleGizmo(*scene.selectedObject, view, proj);
         }
+
+        // 2. Проверка: если UI поглотил ввод, пропускаем обработку сцены
+        bool uiWantsInput = ImGui::GetIO().WantCaptureMouse || ImGuizmo::IsUsing();
+        if (!uiWantsInput) {
+            handleObjectSelection(scene, window, view, proj);
+        }
+
         
         ImGui::End();
+
+        renderScene(proj * view);
 
         // Рендеринг ImGui
         ImGui::Render();
@@ -637,6 +830,8 @@ void createCube(Mesh& mesh, float size) {
     add_quad(vertices[2], vertices[3], vertices[7], vertices[6]); // Зад
     add_quad(vertices[1], vertices[2], vertices[6], vertices[5]); // Право
     add_quad(vertices[3], vertices[0], vertices[4], vertices[7]); // Лево
+    mesh.generateNormals();
+    mesh.uploadToGPU();
 }
 
 // Работа с Gizmo
