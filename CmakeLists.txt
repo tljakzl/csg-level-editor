@@ -13,6 +13,7 @@ include_directories(lib/imgui)
 include_directories(lib/imgui/backends)
 include_directories(lib/glm)
 include_directories(lib/ImGuizmo)
+include_directories(lib/json/include)
 
 add_executable(editor
     src/main.cpp
