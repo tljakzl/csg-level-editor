@@ -16,12 +16,17 @@
 //#include <CGAL/draw_surface_mesh.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
+#include <CGAL/Polygon_mesh_processing/corefinement.h>
+#include <CGAL/Polygon_mesh_processing/remesh.h>
 #include <vector>
 #include <iostream>
+#include <algorithm>
+#include <memory>
 
 // CGAL типы
 typedef CGAL::Simple_cartesian<double> Kernel;
 typedef CGAL::Surface_mesh<Kernel::Point_3> CGAL_Mesh;
+namespace PMP = CGAL::Polygon_mesh_processing;
 
 // Класс меша с интеграцией CGAL и OpenGL
 class Mesh {
@@ -38,7 +43,7 @@ public:
             std::cout << "Input mesh is not triangulated." << std::endl;
         else
             std::cout << "Input mesh is triangulated." << std::endl;
-        namespace PMP = CGAL::Polygon_mesh_processing;
+
         //PMP::triangulate_faces(cgal_mesh);
 
         std::cout << "number_of_faces: " << cgal_mesh.number_of_faces() << std::endl;
@@ -142,6 +147,118 @@ public:
     }
 };
 
+// Класс объекта сцены
+class SceneObject {
+public:
+    Mesh mesh;
+    bool selected = false;
+    bool isOperationResult = false; // Для автоматически созданных объектов
+
+    SceneObject(Mesh&& m) : mesh(std::move(m)) {}
+};
+
+// Менеджер сцены
+class Scene {
+public:
+    std::vector<std::unique_ptr<SceneObject>> objects;
+    SceneObject* selectedObject = nullptr;
+
+    void addObject(Mesh&& mesh) {
+        objects.emplace_back(std::make_unique<SceneObject>(std::move(mesh)));
+    }
+
+    void deleteSelected() {
+        objects.erase(
+            std::remove_if(objects.begin(), objects.end(),
+                [this](auto& obj) { return obj.get() == selectedObject; }),
+            objects.end()
+        );
+        selectedObject = nullptr;
+    }
+};
+
+// Ray casting для выбора объектов
+class Ray {
+public:
+    glm::vec3 origin;
+    glm::vec3 direction;
+
+    static Ray fromMouse(GLFWwindow* window, const glm::mat4& view, const glm::mat4& proj) {
+        double x, y;
+        glfwGetCursorPos(window, &x, &y);
+
+        int width, height;
+        glfwGetWindowSize(window, &width, &height);
+
+        glm::vec4 rayClip(
+            (2.0f * x) / width - 1.0f,
+            1.0f - (2.0f * y) / height,
+            -1.0f,
+            1.0f
+        );
+
+        glm::vec4 rayEye = glm::inverse(proj) * rayClip;
+        rayEye = glm::vec4(rayEye.x, rayEye.y, -1.0f, 0.0f);
+
+        glm::vec3 rayWorld = glm::vec3(glm::inverse(view) * rayEye);
+        return { glm::vec3(glm::inverse(view)[3]), glm::normalize(rayWorld) };
+    }
+};
+
+// Обновленная секция CSG операций
+class CSGOperations {
+public:
+    static bool difference(Scene& scene, SceneObject* A, SceneObject* B) {
+        try {
+            Mesh result;
+
+            // Применяем трансформации к мешам
+            CGAL_Mesh meshA = applyTransform(A->mesh);
+            CGAL_Mesh meshB = applyTransform(B->mesh);
+
+            //CGAL::Corefinement::Difference differ;
+            if (PMP::corefine_and_compute_difference(meshA, meshB, result.cgal_mesh)) {
+                result.uploadToGPU();
+                result.color = glm::vec3(0.4f, 0.8f, 0.6f);
+                scene.addObject(std::move(result));
+
+                // Помечаем исходные объекты для удаления
+                A->isOperationResult = true;
+                B->isOperationResult = true;
+                return true;
+            }
+        }
+        catch (...) {
+            std::cerr << "CSG operation failed\n";
+        }
+        return false;
+    }
+
+private:
+    static CGAL_Mesh applyTransform(const Mesh& mesh) {
+        CGAL_Mesh result;
+        glm::mat4 invTransform = glm::inverse(mesh.transform);
+
+        for (auto v : mesh.cgal_mesh.vertices()) {
+            auto p = mesh.cgal_mesh.point(v);
+            glm::vec4 pos(p.x(), p.y(), p.z(), 1.0f);
+            pos = invTransform * pos;
+            result.add_vertex(Kernel::Point_3(pos.x, pos.y, pos.z));
+        }
+
+        // Копируем топологию
+        for (auto f : mesh.cgal_mesh.faces()) {
+            std::vector<CGAL_Mesh::Vertex_index> vertices;
+            for (auto v : mesh.cgal_mesh.vertices_around_face(mesh.cgal_mesh.halfedge(f))) {
+                vertices.push_back(v);
+            }
+            result.add_face(vertices);
+        }
+        return result;
+    }
+};
+
+
 // Прототипы функций
 GLFWwindow* initGLFW();
 void initImGui(GLFWwindow* window);
@@ -151,12 +268,6 @@ void handleGizmo(Mesh& mesh, const glm::mat4& view, const glm::mat4& proj);
 int main() {
     GLFWwindow* window = initGLFW();
     initImGui(window);
-    
-    // Тестовый меш
-    Mesh cube;
-    createCube(cube);
-    cube.uploadToGPU();
-    cube.color = glm::vec3(0.8f, 0.2f, 0.3f);
     
     // Камера
     glm::mat4 view = glm::lookAt(
@@ -171,6 +282,17 @@ int main() {
         100.0f
     );
 
+    Scene scene;
+    //scene.addObject(std::move(cube));
+
+    // Новая функция рендеринга
+    auto renderScene = [&](const glm::mat4& viewProj) {
+        for (auto& obj : scene.objects) {
+            if (obj->isOperationResult) continue;
+            obj->mesh.render(viewProj);
+        }
+        };
+
     // Главный цикл
     while (!glfwWindowShouldClose(window)) {
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
@@ -182,10 +304,32 @@ int main() {
         ImGui::NewFrame();
         ImGuizmo::BeginFrame();
 
+        // Обработка выбора объектов
+        if (ImGui::IsMouseClicked(0) && ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow)) {
+            Ray ray = Ray::fromMouse(window, view, proj);
+
+            float minDist = FLT_MAX;
+            for (auto& obj : scene.objects) {
+                if (obj->isOperationResult) continue;
+
+                // Простая проверка AABB
+                glm::vec3 objPos(obj->mesh.transform[3]);
+                float dist = glm::distance(ray.origin, objPos);
+                if (dist < minDist) {
+                    scene.selectedObject = obj.get();
+                    minDist = dist;
+                }
+            }
+        }
+
         // Окно редактора
         ImGui::Begin("CSG Editor");
         if (ImGui::Button("Add Cube")) {
-            // Добавление новых объектов
+            Mesh cube;
+            createCube(cube);
+            cube.uploadToGPU();
+            cube.color = glm::vec3(0.8f, 0.2f, 0.3f);
+            scene.addObject(std::move(cube));
         }
         ImGui::End();
 
@@ -193,10 +337,27 @@ int main() {
         ImGui::Begin("Viewport", nullptr, 
             ImGuiWindowFlags_NoScrollbar | 
             ImGuiWindowFlags_NoScrollWithMouse);
-        
-        // Рендеринг 3D
-        cube.render(proj * view);
-        handleGizmo(cube, view, proj);
+
+        // Кнопки CSG
+        ImGui::Begin("CSG Tools");
+        if (ImGui::Button("Difference") && scene.selectedObject) {
+            // Для демо - вычитаем первый попавшийся объект
+            for (auto& obj : scene.objects) {
+                if (obj.get() != scene.selectedObject && !obj->isOperationResult) {
+                    if (CSGOperations::difference(scene, scene.selectedObject, obj.get())) {
+                        scene.deleteSelected(); // Удаляем оригиналы
+                        break;
+                    }
+                }
+            }
+        }
+        ImGui::End();
+
+        // Рендеринг
+        renderScene(proj * view);
+        if (scene.selectedObject) {
+            handleGizmo(scene.selectedObject->mesh, view, proj);
+        }
         
         ImGui::End();
 
