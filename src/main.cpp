@@ -456,6 +456,7 @@ public:
 
             if (success) {
                 A.cgal_mesh = std::move(result);
+                applyTransform(A.cgal_mesh, glm::inverse(A.transform));
                 A.uploadToGPU();
                 return true;
             }
@@ -670,6 +671,8 @@ int main() {
     GLFWwindow* window = initGLFW();
     initImGui(window);
     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    glEnable(GL_CULL_FACE);
+    //glCullFace(GL_FRONT);
     // Камера
     glm::mat4 view = glm::lookAt(
         glm::vec3(5,5,5), 
@@ -699,6 +702,10 @@ int main() {
         }
         };
 
+
+    //Mesh cube1;
+    //createCube(cube1);
+
     // Главный цикл
     while (!glfwWindowShouldClose(window)) {
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
@@ -709,6 +716,7 @@ int main() {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         ImGuizmo::BeginFrame();
+
 
         // Окно редактора
         ImGui::Begin("CSG Editor");
