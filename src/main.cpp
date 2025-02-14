@@ -35,6 +35,128 @@ typedef CGAL::Simple_cartesian<double> Kernel;
 typedef CGAL::Surface_mesh<Kernel::Point_3> CGAL_Mesh;
 namespace PMP = CGAL::Polygon_mesh_processing;
 
+// Шейдеры (встроенные в код для простоты)
+static const char* default_vs = R"(
+           #version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoord;
+
+out vec3 vNormal;
+out vec2 vTexCoord;
+out vec3 vFragPos;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform mat4 uModel;
+
+void main() {
+    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);
+    vNormal = mat3(transpose(inverse(uModel))) * aNormal;
+    vTexCoord = aTexCoord;
+    vFragPos = vec3(uModel * vec4(aPos, 1.0));
+}
+        )";
+
+static const char* default_fs = R"(
+            #version 460 core
+            in vec3 vNormal;
+            uniform vec3 uColor;
+            out vec4 FragColor;
+            void main() {
+                vec3 lightDir = normalize(vec3(0.5, 1.0, 0.7));
+                float diff = max(dot(vNormal, lightDir), 0.2);
+                FragColor = vec4(uColor * diff, 1.0);
+            }
+        )";
+
+static const char* debug_normals_fs = R"(
+#version 420 core
+out vec4 FragColor;
+
+void main()
+{
+    FragColor = vec4(1.0, 1.0, 0.0, 1.0);
+}  
+)";
+
+static const char* debug_normals_vs = R"(
+#version 420 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+
+out VS_OUT {
+    vec3 normal;
+} vs_out;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform mat4 uModel;
+
+void main()
+{
+    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0); 
+    mat3 normalMatrix = mat3(transpose(inverse(uView * uModel)));
+    vs_out.normal = normalize(vec3(uProj * vec4(normalMatrix * aNormal, 0.0)));
+}
+)";
+
+static const char* debug_normals_gs = R"(
+#version 420 core
+layout (triangles) in;
+layout (line_strip, max_vertices = 6) out;
+
+in VS_OUT {
+    vec3 normal;
+} gs_in[];
+
+const float MAGNITUDE = 0.515;
+
+void GenerateLine(int index)
+{
+    gl_Position = gl_in[index].gl_Position;
+    EmitVertex();
+    gl_Position = gl_in[index].gl_Position + vec4(gs_in[index].normal, 0.0) * MAGNITUDE;
+    EmitVertex();
+    EndPrimitive();
+}
+
+void main()
+{
+    GenerateLine(0);
+    GenerateLine(1);
+    GenerateLine(2);
+}
+)";
+
+// Компиляция шейдеров
+static GLuint CompileShader(const char* vertexShader, const char* fragmentShader, const char* geometryShader = nullptr) {
+    GLuint vShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vShader, 1, &vertexShader, NULL);
+    glCompileShader(vShader);
+
+    GLuint fShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fShader, 1, &fragmentShader, NULL);
+    glCompileShader(fShader);
+
+    unsigned int geometry;
+    if (geometryShader != nullptr)
+    {
+        geometry = glCreateShader(GL_GEOMETRY_SHADER);
+        glShaderSource(geometry, 1, &geometryShader, NULL);
+        glCompileShader(geometry);
+    }
+
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vShader);
+    glAttachShader(prog, fShader);
+    if (geometryShader != nullptr)
+        glAttachShader(prog, geometry);
+    glLinkProgram(prog);
+
+    return prog;
+};
+
 // Класс слоя сцены
 class SceneLayer {
 public:
@@ -192,67 +314,15 @@ public:
         }
     }
 
-    void render(const glm::mat4& viewProj) const {
+    void render(const glm::mat4& view, const glm::mat4& proj, unsigned int shader_id) const {
         if(vao == 0) return;
-
-        // Шейдеры (встроенные в код для простоты)
-        static const char* vertexShader = R"(
-           #version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
-
-out vec3 vNormal;
-out vec2 vTexCoord;
-out vec3 vFragPos;
-
-uniform mat4 uViewProj;
-uniform mat4 uModel;
-
-void main() {
-    gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
-    vNormal = mat3(transpose(inverse(uModel))) * aNormal;
-    vTexCoord = aTexCoord;
-    vFragPos = vec3(uModel * vec4(aPos, 1.0));
-}
-        )";
-
-        static const char* fragmentShader = R"(
-            #version 460 core
-            in vec3 vNormal;
-            uniform vec3 uColor;
-            out vec4 FragColor;
-            void main() {
-                vec3 lightDir = normalize(vec3(0.5, 1.0, 0.7));
-                float diff = max(dot(vNormal, lightDir), 0.2);
-                FragColor = vec4(uColor * diff, 1.0);
-            }
-        )";
-
-        // Компиляция шейдеров
-        static GLuint program = [](){
-            GLuint vShader = glCreateShader(GL_VERTEX_SHADER);
-            glShaderSource(vShader, 1, &vertexShader, NULL);
-            glCompileShader(vShader);
-            
-            GLuint fShader = glCreateShader(GL_FRAGMENT_SHADER);
-            glShaderSource(fShader, 1, &fragmentShader, NULL);
-            glCompileShader(fShader);
-            
-            GLuint prog = glCreateProgram();
-            glAttachShader(prog, vShader);
-            glAttachShader(prog, fShader);
-            glLinkProgram(prog);
-            return prog;
-        }();
-
-        // Рендеринг
-        glUseProgram(program);
-        glUniformMatrix4fv(glGetUniformLocation(program, "uViewProj"), 
-                        1, GL_FALSE, glm::value_ptr(viewProj));
-        glUniformMatrix4fv(glGetUniformLocation(program, "uModel"), 
+        glUniformMatrix4fv(glGetUniformLocation(shader_id, "uView"),
+                        1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(glGetUniformLocation(shader_id, "uProj"),
+                        1, GL_FALSE, glm::value_ptr(proj));
+        glUniformMatrix4fv(glGetUniformLocation(shader_id, "uModel"),
                         1, GL_FALSE, glm::value_ptr(transform));
-        glUniform3fv(glGetUniformLocation(program, "uColor"), 
+        glUniform3fv(glGetUniformLocation(shader_id, "uColor"),
                         1, glm::value_ptr(color));
         
         if (vao == 0) return;
@@ -380,9 +450,11 @@ public:
         layers.emplace_back("Lighting");
     }
 
-    void addObject(Mesh&& mesh) {
+    SceneObject& addObject(Mesh&& mesh) {
         objects.emplace_back(std::make_unique<SceneObject>(std::move(mesh)));
-        objects.back()->layer = selectedLayer;
+        auto& obj = objects.back();
+        obj->layer = selectedLayer;
+        return *obj;
     }
 
     void deleteSelected() {
@@ -671,7 +743,7 @@ int main() {
     GLFWwindow* window = initGLFW();
     initImGui(window);
     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-    glEnable(GL_CULL_FACE);
+    //glEnable(GL_CULL_FACE);
     //glCullFace(GL_FRONT);
     // Камера
     glm::mat4 view = glm::lookAt(
@@ -688,8 +760,12 @@ int main() {
 
     Scene scene;
 
+    auto shader_id = CompileShader(default_vs, default_fs);
+    auto debug_normals_shader_id = CompileShader(debug_normals_vs, debug_normals_fs, debug_normals_gs);
+    // Рендеринг
+
 // Обновлённый рендеринг с учётом слоёв
-    auto renderScene = [&](const glm::mat4& viewProj) {
+    auto renderScene = [&](const glm::mat4& view, const glm::mat4& proj) {
         for (auto& layer : scene.layers) {
             if (!layer.visible) continue;
 
@@ -697,18 +773,36 @@ int main() {
                 if (obj->layer != &layer - &scene.layers[0]) continue;
                 if (!obj->mesh.visible) continue;
 
-                obj->mesh.render(viewProj);
+                glUseProgram(shader_id);
+                obj->mesh.render(view, proj, shader_id);
+                glUseProgram(debug_normals_shader_id);
+                obj->mesh.render(view, proj, debug_normals_shader_id);
             }
         }
-        };
+    };
 
+    {
+        Mesh cube;
+        createCube(cube);
+        cube.color = glm::vec3(0.8f, 0.2f, 0.3f);
+        auto& obj = scene.addObject(std::move(cube));
+        obj.transform.scale = glm::vec3(3.f);
+        obj.transform.position = glm::vec3(-1.f,0.f, -1.f);
+        obj.updateTransform();
+    }
 
-    //Mesh cube1;
-    //createCube(cube1);
+    {
+        Mesh cube;
+        createCube(cube);
+        cube.color = glm::vec3(0.2f, 0.8f, 0.3f);
+        auto& obj = scene.addObject(std::move(cube));
+        obj.transform.scale = glm::vec3(1.f,3.f,1.f);
+        obj.updateTransform();
+    }
 
     // Главный цикл
     while (!glfwWindowShouldClose(window)) {
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        glClearColor(0.4f, 0.4f, 0.4f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         // Обновление ImGui
@@ -769,7 +863,7 @@ int main() {
         
         ImGui::End();
 
-        renderScene(proj * view);
+        renderScene(view, proj);
 
         // Рендеринг ImGui
         ImGui::Render();
