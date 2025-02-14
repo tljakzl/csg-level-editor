@@ -188,12 +188,13 @@ public:
 
     void generateNormals() {
         normals.clear();
-        normals.resize(cgal_mesh.number_of_vertices(), glm::vec3(0));
+        normals.resize(cgal_mesh.number_of_faces(), glm::vec3(0));
         using Vertexx = CGAL_Mesh::Vertex_index;
         // 1. Вычисляем нормали для каждой грани
         for (auto face : cgal_mesh.faces()) {
             // Получаем вершины грани
             std::vector<Vertexx> face_vertices;
+            
             for (auto v : cgal_mesh.vertices_around_face(cgal_mesh.halfedge(face))) {
                 face_vertices.push_back(v);
             }
@@ -207,28 +208,18 @@ public:
             glm::vec3 v1(p2.x() - p0.x(), p2.y() - p0.y(), p2.z() - p0.z());
             glm::vec3 face_normal = glm::normalize(glm::cross(v0, v1));
 
-            // Добавляем нормаль к вершинам
-            for (auto v : face_vertices) {
-                size_t idx = v;
-                normals[idx] += face_normal;
-            }
-        }
-
-        // 2. Нормализуем и усредняем
-        for (auto& n : normals) {
-            n = glm::normalize(n);
+            std::cout << "Normal: " << "(" << face_normal.x << ", " << face_normal.y << ", " << face_normal.z << ")\n";
+            normals[face] = face_normal;
         }
     }
 
     void uploadToGPU() {
-        //std::vector<float> vertexData;
+        generateNormals();
 
         if (!CGAL::is_triangle_mesh(cgal_mesh))
             std::cout << "Input mesh is not triangulated." << std::endl;
         else
             std::cout << "Input mesh is triangulated." << std::endl;
-
-        //PMP::triangulate_faces(cgal_mesh);
 
         std::cout << "number_of_faces: " << cgal_mesh.number_of_faces() << std::endl;
         std::cout << "number_of_vertices: " << cgal_mesh.number_of_vertices() << std::endl;
@@ -237,38 +228,49 @@ public:
         std::vector<Vertex> vertices;
         std::vector<GLuint> indices;
 
-        // Заполняем вершины данными из CGAL меша
-        for (auto v : cgal_mesh.vertices()) {
-            auto p = cgal_mesh.point(v);
-            Vertex vertex;
-            vertex.position = glm::vec3(p.x(), p.y(), p.z());
-
-            // Нормаль (должны быть предварительно вычислены через generateNormals())
-            if (!normals.empty() && v.idx() < normals.size()) {
-                vertex.normal = normals[v.idx()];
+        for (auto face : cgal_mesh.faces()) {
+            // Получаем вершины грани
+            using Vertexx = CGAL_Mesh::Vertex_index;
+            std::vector<Vertexx> face_vertices;
+            for (auto v : cgal_mesh.vertices_around_face(cgal_mesh.halfedge(face))) {
+                face_vertices.push_back(v);
             }
 
-            // UV-координаты (должны быть предварительно сгенерированы)
-            if (!texCoords.empty() && v.idx() < texCoords.size()) {
-                vertex.texCoord = texCoords[v.idx()];
+            // Вычисляем нормаль грани
+            Kernel::Point_3 p0 = cgal_mesh.point(face_vertices[0]);
+            Kernel::Point_3 p1 = cgal_mesh.point(face_vertices[1]);
+            Kernel::Point_3 p2 = cgal_mesh.point(face_vertices[2]);
+            
+            {
+                Vertex vertex;
+                vertex.position = glm::vec3(p0.x(), p0.y(), p0.z());
+                vertex.normal = normals[face];
+                vertex.texCoord = glm::vec2();
+                vertices.push_back(vertex);
             }
 
-            vertices.push_back(vertex);
-        }
-
-        // Генерируем индексы для экономии памяти
-        for (auto f : cgal_mesh.faces()) {
-            auto h = cgal_mesh.halfedge(f);
-            for (int i = 0; i < 3; ++i) { // Для треугольников
-                indices.push_back(cgal_mesh.source(h).idx());
-                h = cgal_mesh.next(h);
+            {
+                Vertex vertex;
+                vertex.position = glm::vec3(p1.x(), p1.y(), p1.z());
+                vertex.normal = normals[face];
+                vertex.texCoord = glm::vec2();
+                vertices.push_back(vertex);
             }
+
+            {
+                Vertex vertex;
+                vertex.position = glm::vec3(p2.x(), p2.y(), p2.z());
+                vertex.normal = normals[face];
+                vertex.texCoord = glm::vec2();
+                vertices.push_back(vertex);
+            }
+
         }
 
         // 2. Создание OpenGL объектов
         if (vao == 0) glGenVertexArrays(1, &vao);
         if (vbo == 0) glGenBuffers(1, &vbo);
-        if (ebo == 0) glGenBuffers(1, &ebo);
+        //if (ebo == 0) glGenBuffers(1, &ebo);
 
         glBindVertexArray(vao);
 
@@ -277,13 +279,6 @@ public:
         glBufferData(GL_ARRAY_BUFFER,
             vertices.size() * sizeof(Vertex),
             vertices.data(),
-            GL_STATIC_DRAW);
-
-        // Индексный буфер
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-            indices.size() * sizeof(GLuint),
-            indices.data(),
             GL_STATIC_DRAW);
 
         // 3. Настройка атрибутов
@@ -328,10 +323,8 @@ public:
         if (vao == 0) return;
 
         glBindVertexArray(vao);
-        glDrawElements(GL_TRIANGLES,
-            cgal_mesh.number_of_faces() * 3, // 3 индекса на треугольник
-            GL_UNSIGNED_INT,
-            0);
+        glDrawArrays(GL_TRIANGLES,0,
+            cgal_mesh.num_halfedges());
         glBindVertexArray(0);
     }
 };
@@ -742,7 +735,7 @@ void drawPropertiesWindow(Scene& scene) {
 int main() {
     GLFWwindow* window = initGLFW();
     initImGui(window);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    //glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     //glEnable(GL_CULL_FACE);
     //glCullFace(GL_FRONT);
     // Камера
@@ -932,9 +925,8 @@ void createCube(Mesh& mesh, float size) {
     add_quad(vertices[2], vertices[3], vertices[7], vertices[6]); // Зад
     add_quad(vertices[1], vertices[2], vertices[6], vertices[5]); // Право
     add_quad(vertices[3], vertices[0], vertices[4], vertices[7]); // Лево
-    mesh.generateNormals();
     mesh.uploadToGPU();
-}
+}    
 
 // Работа с Gizmo
 void handleGizmo(SceneObject& obj, const glm::mat4& view, const glm::mat4& proj) {
