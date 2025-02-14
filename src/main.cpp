@@ -37,37 +37,60 @@ namespace PMP = CGAL::Polygon_mesh_processing;
 
 // Шейдеры (встроенные в код для простоты)
 static const char* default_vs = R"(
-           #version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
 
-out vec3 vNormal;
-out vec2 vTexCoord;
-out vec3 vFragPos;
+out vec3 FragPos;
+out vec3 Normal;
 
+uniform mat4 uModel;
 uniform mat4 uView;
 uniform mat4 uProj;
-uniform mat4 uModel;
 
-void main() {
-    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);
-    vNormal = mat3(transpose(inverse(uModel))) * aNormal;
-    vTexCoord = aTexCoord;
-    vFragPos = vec3(uModel * vec4(aPos, 1.0));
+void main()
+{
+    FragPos = vec3(uModel * vec4(aPos, 1.0));
+    Normal = mat3(transpose(inverse(uModel))) * aNormal;  
+    
+    gl_Position = uProj * uView * vec4(FragPos, 1.0);
 }
         )";
 
 static const char* default_fs = R"(
-            #version 460 core
-            in vec3 vNormal;
-            uniform vec3 uColor;
-            out vec4 FragColor;
-            void main() {
-                vec3 lightDir = normalize(vec3(0.5, 1.0, 0.7));
-                float diff = max(dot(vNormal, lightDir), 0.2);
-                FragColor = vec4(uColor * diff, 1.0);
-            }
+#version 330 core
+out vec4 FragColor;
+
+in vec3 Normal;  
+in vec3 FragPos;  
+  
+uniform vec3 lightPos; 
+uniform vec3 viewPos; 
+uniform vec3 lightColor;
+uniform vec3 uObjColor;
+
+void main()
+{
+    // ambient
+    float ambientStrength = 0.1;
+    vec3 ambient = ambientStrength * lightColor;
+  	
+    // diffuse 
+    vec3 norm = normalize(Normal);
+    vec3 lightDir = normalize(lightPos - FragPos);
+    float diff = max(dot(norm, lightDir), 0.0);
+    vec3 diffuse = diff * lightColor;
+    
+    // specular
+    float specularStrength = 0.5;
+    vec3 viewDir = normalize(viewPos - FragPos);
+    vec3 reflectDir = reflect(-lightDir, norm);  
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32);
+    vec3 specular = specularStrength * spec * lightColor;  
+        
+    vec3 result = (ambient + diffuse + specular) * uObjColor;
+    FragColor = vec4(result, 1.0);
+} 
         )";
 
 static const char* debug_normals_fs = R"(
@@ -129,33 +152,64 @@ void main()
 }
 )";
 
+static void checkCompileErrors(GLuint shader, std::string type)
+{
+    GLint success;
+    GLchar infoLog[1024];
+    if (type != "PROGRAM")
+    {
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+        if (!success)
+        {
+            glGetShaderInfoLog(shader, 1024, NULL, infoLog);
+            std::cout << "ERROR::SHADER_COMPILATION_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
+        }
+    }
+    else
+    {
+        glGetProgramiv(shader, GL_LINK_STATUS, &success);
+        if (!success)
+        {
+            glGetProgramInfoLog(shader, 1024, NULL, infoLog);
+            std::cout << "ERROR::PROGRAM_LINKING_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
+        }
+    }
+}
+
 // Компиляция шейдеров
 static GLuint CompileShader(const char* vertexShader, const char* fragmentShader, const char* geometryShader = nullptr) {
     GLuint vShader = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vShader, 1, &vertexShader, NULL);
     glCompileShader(vShader);
+    checkCompileErrors(vShader, "VERTEX");
 
     GLuint fShader = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fShader, 1, &fragmentShader, NULL);
     glCompileShader(fShader);
+    checkCompileErrors(fShader, "FRAGMENT");
 
-    unsigned int geometry;
+    unsigned int gShader;
     if (geometryShader != nullptr)
     {
-        geometry = glCreateShader(GL_GEOMETRY_SHADER);
-        glShaderSource(geometry, 1, &geometryShader, NULL);
-        glCompileShader(geometry);
+        gShader = glCreateShader(GL_GEOMETRY_SHADER);
+        glShaderSource(gShader, 1, &geometryShader, NULL);
+        glCompileShader(gShader);
+        checkCompileErrors(gShader, "GEOMETRY");
     }
 
     GLuint prog = glCreateProgram();
     glAttachShader(prog, vShader);
     glAttachShader(prog, fShader);
     if (geometryShader != nullptr)
-        glAttachShader(prog, geometry);
+        glAttachShader(prog, gShader);
     glLinkProgram(prog);
 
     return prog;
 };
+
+glm::vec3 lightPosition(4);
+glm::vec3 lightColor(1);
+glm::vec3 viewPosison(5);
 
 // Класс слоя сцены
 class SceneLayer {
@@ -317,8 +371,18 @@ public:
                         1, GL_FALSE, glm::value_ptr(proj));
         glUniformMatrix4fv(glGetUniformLocation(shader_id, "uModel"),
                         1, GL_FALSE, glm::value_ptr(transform));
-        glUniform3fv(glGetUniformLocation(shader_id, "uColor"),
+        glUniform3fv(glGetUniformLocation(shader_id, "uObjColor"),
                         1, glm::value_ptr(color));
+        glUniform3fv(glGetUniformLocation(shader_id, "lightPos"),
+            1, glm::value_ptr(lightPosition));
+        glUniform3fv(glGetUniformLocation(shader_id, "lightColor"),
+            1, glm::value_ptr(lightColor));
+        glUniform3fv(glGetUniformLocation(shader_id, "viewPos"),
+            1, glm::value_ptr(viewPosison));
+
+       // uniform vec3 lightPos;
+       // uniform vec3 viewPos;
+        //uniform vec3 lightColor;
         
         if (vao == 0) return;
 
@@ -740,7 +804,7 @@ int main() {
     //glCullFace(GL_FRONT);
     // Камера
     glm::mat4 view = glm::lookAt(
-        glm::vec3(5,5,5), 
+        viewPosison, 
         glm::vec3(0,0,0), 
         glm::vec3(0,1,0)
     );
@@ -779,7 +843,7 @@ int main() {
         createCube(cube);
         cube.color = glm::vec3(0.8f, 0.2f, 0.3f);
         auto& obj = scene.addObject(std::move(cube));
-        obj.transform.scale = glm::vec3(3.f);
+        obj.transform.scale = glm::vec3(5.f);
         obj.transform.position = glm::vec3(-1.f,0.f, -1.f);
         obj.updateTransform();
     }
