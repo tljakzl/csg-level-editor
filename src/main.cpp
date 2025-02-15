@@ -68,6 +68,7 @@ uniform vec3 lightPos;
 uniform vec3 viewPos; 
 uniform vec3 lightColor;
 uniform vec3 uObjColor;
+uniform int facesDirection;
 
 void main()
 {
@@ -76,7 +77,7 @@ void main()
     vec3 ambient = ambientStrength * lightColor;
   	
     // diffuse 
-    vec3 norm = normalize(Normal);
+    vec3 norm = normalize(facesDirection * Normal);
     vec3 lightDir = normalize(lightPos - FragPos);
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * lightColor;
@@ -236,9 +237,15 @@ public:
     glm::mat4 transform = glm::mat4(1.0f);
     glm::vec3 color = glm::vec3(1.0f);
     bool visible = true;
+    int facesDirection = 1;
 
     std::vector<glm::vec3> normals;
     std::vector<glm::vec2> texCoords;
+
+    void flipNormals()
+    {
+        facesDirection *= -1;
+    }
 
     void generateNormals() {
         normals.clear();
@@ -379,6 +386,17 @@ public:
             1, glm::value_ptr(lightColor));
         glUniform3fv(glGetUniformLocation(shader_id, "viewPos"),
             1, glm::value_ptr(viewPosison));
+        glUniform1i(glGetUniformLocation(shader_id, "facesDirection"), facesDirection);
+        if (facesDirection == 1)
+        {
+            //glDisable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+        }
+        else if (facesDirection == -1)
+        {
+            //glEnable(GL_CULL_FACE);
+            glCullFace(GL_FRONT);
+        }
 
        // uniform vec3 lightPos;
        // uniform vec3 viewPos;
@@ -800,7 +818,7 @@ int main() {
     GLFWwindow* window = initGLFW();
     initImGui(window);
     //glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-    //glEnable(GL_CULL_FACE);
+    glEnable(GL_CULL_FACE);
     //glCullFace(GL_FRONT);
     // Камера
     glm::mat4 view = glm::lookAt(
@@ -841,9 +859,10 @@ int main() {
     {
         Mesh cube;
         createCube(cube);
+        cube.flipNormals();
         cube.color = glm::vec3(0.8f, 0.2f, 0.3f);
         auto& obj = scene.addObject(std::move(cube));
-        obj.transform.scale = glm::vec3(5.f);
+        obj.transform.scale = glm::vec3(3.f);
         obj.transform.position = glm::vec3(-1.f,0.f, -1.f);
         obj.updateTransform();
     }
