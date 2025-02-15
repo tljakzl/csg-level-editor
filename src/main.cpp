@@ -525,11 +525,11 @@ public:
         layers.emplace_back("Lighting");
     }
 
-    SceneObject& addObject(Mesh&& mesh) {
+    SceneObject* addObject(Mesh&& mesh) {
         objects.emplace_back(std::make_unique<SceneObject>(std::move(mesh)));
         auto& obj = objects.back();
         obj->layer = selectedLayer;
-        return *obj;
+        return obj.get();
     }
 
     void deleteSelected() {
@@ -580,7 +580,14 @@ public:
 // Обновленная секция CSG операций
 class CSGOperations {
 public:
-    static bool difference(Mesh& A, const Mesh& B) {
+    enum class Operaion
+    {
+        UNION = 0,
+        DIFFERENCE,
+        INTERSECTION,
+
+    };
+    static bool run(Mesh& A, const Mesh& B, Operaion operation) {
         try {
             // Создаем копии мешей для операции
             CGAL_Mesh meshA = A.cgal_mesh;
@@ -591,15 +598,44 @@ public:
             applyTransform(meshB, B.transform);
 
             // Выполняем булеву операцию
+            bool success = false;
+
             CGAL_Mesh result;
-            bool success = PMP::corefine_and_compute_difference(
-                meshA,
-                meshB,
-                result,
-                PMP::parameters::default_values(),
-                PMP::parameters::default_values(),
-                PMP::parameters::default_values()
-            );
+            switch (operation)
+            {
+            case CSGOperations::Operaion::UNION:
+                 success = PMP::corefine_and_compute_union(
+                    meshA,
+                    meshB,
+                    result,
+                    PMP::parameters::default_values(),
+                    PMP::parameters::default_values(),
+                    PMP::parameters::default_values()
+                );
+                break;
+            case CSGOperations::Operaion::DIFFERENCE:
+                 success = PMP::corefine_and_compute_difference(
+                    meshA,
+                    meshB,
+                    result,
+                    PMP::parameters::default_values(),
+                    PMP::parameters::default_values(),
+                    PMP::parameters::default_values()
+                );
+                break;
+            case CSGOperations::Operaion::INTERSECTION:
+                 success = PMP::corefine_and_compute_intersection(
+                    meshA,
+                    meshB,
+                    result,
+                    PMP::parameters::default_values(),
+                    PMP::parameters::default_values(),
+                    PMP::parameters::default_values()
+                );
+                break;
+            default:
+                break;
+            }
 
             if (success) {
                 A.cgal_mesh = std::move(result);
@@ -817,7 +853,6 @@ void drawPropertiesWindow(Scene& scene) {
 int main() {
     GLFWwindow* window = initGLFW();
     initImGui(window);
-    //glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     glEnable(GL_CULL_FACE);
     //glCullFace(GL_FRONT);
     // Камера
@@ -857,23 +892,38 @@ int main() {
     };
 
     {
-        Mesh cube;
-        createCube(cube);
-        cube.flipNormals();
-        cube.color = glm::vec3(0.8f, 0.2f, 0.3f);
-        auto& obj = scene.addObject(std::move(cube));
-        obj.transform.scale = glm::vec3(3.f);
-        obj.transform.position = glm::vec3(-1.f,0.f, -1.f);
-        obj.updateTransform();
-    }
+        Mesh cube1;
+        createCube(cube1);
+        cube1.flipNormals();
+        cube1.color = glm::vec3(0.8f, 0.2f, 0.3f);
+        auto obj = scene.addObject(std::move(cube1));
+        obj->transform.scale = glm::vec3(3.f);
+        obj->transform.position = glm::vec3(-1.f,0.f, -1.f);
+        obj->updateTransform();
+    
+        Mesh cube2;
+        createCube(cube2);
+        cube2.color = glm::vec3(0.2f, 0.8f, 0.3f);
+        auto obj2 = scene.addObject(std::move(cube2));
+        obj2->transform.scale = glm::vec3(1.f,3.f,1.f);
+        obj2->updateTransform();
+   
+        scene.selectedObject = obj2;
+        CSGOperations::run(obj->mesh, scene.selectedObject->mesh, CSGOperations::Operaion::DIFFERENCE);
+        scene.deleteSelected();
 
-    {
-        Mesh cube;
-        createCube(cube);
-        cube.color = glm::vec3(0.2f, 0.8f, 0.3f);
-        auto& obj = scene.addObject(std::move(cube));
-        obj.transform.scale = glm::vec3(1.f,3.f,1.f);
-        obj.updateTransform();
+        Mesh cube3;
+        cube3.flipNormals();
+        createCube(cube3);
+        cube3.color = glm::vec3(0.6f, 0.8f, 0.3f);
+        auto obj3 = scene.addObject(std::move(cube3));
+        obj3->transform.position = glm::vec3(0.1f, 1.f, -2.f);
+        obj3->transform.scale = glm::vec3(0.8f, 0.8f, 5.f);
+        obj3->updateTransform();
+
+        scene.selectedObject = obj3;
+        CSGOperations::run(obj->mesh, scene.selectedObject->mesh, CSGOperations::Operaion::UNION);
+        scene.deleteSelected();
     }
 
     // Главный цикл
@@ -897,6 +947,14 @@ int main() {
             cube.color = glm::vec3(0.8f, 0.2f, 0.3f);
             scene.addObject(std::move(cube));
         }
+        if (ImGui::Button("Polygon Mode line"))
+        {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        }
+        if (ImGui::Button("Polygon Mode fill"))
+        {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
         ImGui::End();
 
         // Окно свойств
@@ -911,16 +969,27 @@ int main() {
 
         // Кнопки CSG
         ImGui::Begin("CSG Tools");
-        if (ImGui::Button("Difference") && scene.selectedObject) {
-            // Для демо - вычитаем первый попавшийся объект
-            for (auto& obj : scene.objects) {
-                if (obj.get() != scene.selectedObject && !obj->isOperationResult) {
-                    if (CSGOperations::difference(obj.get()->mesh, scene.selectedObject->mesh)) {
-                        scene.deleteSelected(); // Удаляем оригиналы
-                        break;
+        auto run_button = [&](CSGOperations::Operaion operation)
+            {
+                // Для демо - вычитаем первый попавшийся объект
+                for (auto& obj : scene.objects) {
+                    if (obj.get() != scene.selectedObject && !obj->isOperationResult) {
+                        if (CSGOperations::run(obj.get()->mesh, scene.selectedObject->mesh, operation)) {
+                            scene.deleteSelected(); // Удаляем оригиналы
+                            break;
+                        }
                     }
                 }
-            }
+            };
+
+        if (ImGui::Button("Difference") && scene.selectedObject) {
+            run_button(CSGOperations::Operaion::DIFFERENCE);
+        }
+        if (ImGui::Button("Union") && scene.selectedObject) {
+            run_button(CSGOperations::Operaion::UNION);
+        }
+        if (ImGui::Button("Intersection") && scene.selectedObject) {
+            run_button(CSGOperations::Operaion::INTERSECTION);
         }
         ImGui::End();
 
