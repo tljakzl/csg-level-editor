@@ -31,6 +31,8 @@
 #include <unordered_map>
 #include <optional>
 
+#include "Camera.h"
+
 // CGAL типы
 typedef CGAL::Simple_cartesian<double> Kernel;
 typedef CGAL::Surface_mesh<Kernel::Point_3> CGAL_Mesh;
@@ -38,8 +40,9 @@ namespace PMP = CGAL::Polygon_mesh_processing;
 
 glm::vec3 lightPosition(4);
 glm::vec3 lightColor(1);
-glm::vec3 viewPosison(5);
+//glm::vec3 viewPosison(5);
 bool draw_debug_normals = false;
+static Camera camera(glm::vec3(0.0f, 0.0f, 7.0f));
 
 // Шейдеры (встроенные в код для простоты)
 static const char* default_vs = R"(
@@ -387,22 +390,16 @@ public:
         glUniform3fv(glGetUniformLocation(shader_id, "lightColor"),
             1, glm::value_ptr(lightColor));
         glUniform3fv(glGetUniformLocation(shader_id, "viewPos"),
-            1, glm::value_ptr(viewPosison));
+            1, glm::value_ptr(camera.GetPosition()));
         glUniform1i(glGetUniformLocation(shader_id, "facesDirection"), facesDirection);
         if (facesDirection == 1)
         {
-            //glDisable(GL_CULL_FACE);
             glCullFace(GL_BACK);
         }
         else if (facesDirection == -1)
         {
-            //glEnable(GL_CULL_FACE);
             glCullFace(GL_FRONT);
         }
-
-       // uniform vec3 lightPos;
-       // uniform vec3 viewPos;
-        //uniform vec3 lightColor;
         
         if (vao == 0) return;
 
@@ -850,13 +847,92 @@ void drawPropertiesWindow(Scene& scene) {
     ImGui::End();
 }
 
+static float Width = 1280;
+static float Height = 720;
+static float zNear = 0.1f;
+static float zFar = 500.f;
+static float mouse_x = 0.0;
+static float mouse_y = 0.0;
+static float lastX = 0.0;
+static float lastY = 0.0;
+static bool keys[512];
+static bool dev_mode = false;
+
+void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mode)
+{
+    if (action == GLFW_PRESS)
+        keys[key] = true;
+    else if (action == GLFW_RELEASE)
+        keys[key] = false;
+
+    if (action == GLFW_PRESS)
+    {
+        switch (key)
+        {
+        case GLFW_KEY_ESCAPE:
+            glfwSetWindowShouldClose(window, GL_TRUE);
+            break;
+        case GLFW_KEY_F1:
+            dev_mode = !dev_mode;
+            glfwSetInputMode(window, GLFW_CURSOR, dev_mode ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+        default:;
+        }
+    }
+}
+
+void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
+{
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS)
+    {
+        double xPos;
+        double yPos;
+        //getting cursor position
+        glfwGetCursorPos(window, &xPos, &yPos);
+
+        mouse_x = (static_cast<float>(xPos) - Width / 2.f) / Width * 2.f;
+        mouse_y = -(static_cast<float>(yPos) - Height / 2.f) / Height * 2.f;
+    }
+}
+
+static void MouseCallback(GLFWwindow* window, double xpos, double ypos)
+{
+    static bool firstMouse = true;
+    if (firstMouse)
+    {
+        lastX = xpos;
+        lastY = ypos;
+        firstMouse = false;
+    }
+
+    const float xoffset = xpos - lastX;
+    const float yoffset = lastY - ypos;
+    lastX = xpos;
+    lastY = ypos;
+
+    if (dev_mode)
+        return;
+    camera.ProcessMouseMovement(xoffset, yoffset);
+}
+
+static void ScrollCallback(GLFWwindow* window, double xoffset, double yoffset)
+{
+    camera.ProcessMouseScroll(yoffset);
+}
+
 // Инициализация GLFW
 GLFWwindow* initGLFW() {
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "CSG Editor", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(Width, Height, "CSG Editor", NULL, NULL);
     glfwMakeContextCurrent(window);
+
+    glfwSetMouseButtonCallback(window, MouseButtonCallback);
+    glfwSetCursorPosCallback(window, MouseCallback);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    glfwSetScrollCallback(window, ScrollCallback);
+    glfwSetKeyCallback(window, KeyCallback);
+
     gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
     glEnable(GL_DEPTH_TEST);
     return window;
@@ -948,13 +1024,61 @@ void handleGizmo(SceneObject& obj, const glm::mat4& view, const glm::mat4& proj)
     }
 }
 
+void DoMovement(float dt)
+{
+    if (dev_mode)
+        return;
+
+    // Camera controls
+    if (keys[GLFW_KEY_W])
+        camera.ProcessKeyboard(Camera::Movement::FORWARD, dt);
+    if (keys[GLFW_KEY_S])
+        camera.ProcessKeyboard(Camera::Movement::BACKWARD, dt);
+    if (keys[GLFW_KEY_A])
+        camera.ProcessKeyboard(Camera::Movement::LEFT, dt);
+    if (keys[GLFW_KEY_D])
+        camera.ProcessKeyboard(Camera::Movement::RIGHT, dt);
+    if (keys[GLFW_KEY_SPACE])
+        camera.ProcessKeyboard(Camera::Movement::UP, dt);
+}
+
+double getCurrentTime()
+{
+    return glfwGetTime();
+}
+
+int CalculateFrameRate(float current)
+{
+    static double last = 0.0;
+    static int FPS = 0;
+    ++FPS;
+    static int out_FPS = 0;
+    if (current - last >= 1.0f)
+    {
+        out_FPS = FPS;
+        FPS = 0;
+        last = current;
+    }
+
+    return out_FPS;
+}
+
+int ChangeDeltaTime(float& deltaTime, float& lastFrame)
+{
+    auto currentFrame = getCurrentTime();
+
+    auto FPS = CalculateFrameRate(currentFrame);
+    deltaTime = currentFrame - lastFrame;
+    lastFrame = currentFrame;
+    return FPS;
+}
+
 int main() {
     GLFWwindow* window = initGLFW();
     initImGui(window);
     glEnable(GL_CULL_FACE);
-    //glCullFace(GL_FRONT);
     // Камера
-    glm::mat4 view = glm::lookAt(
+    /*glm::mat4 view = glm::lookAt(
         viewPosison,
         glm::vec3(0, 0, 0),
         glm::vec3(0, 1, 0)
@@ -964,7 +1088,8 @@ int main() {
         1280.0f / 720.0f,
         0.1f,
         100.0f
-    );
+    );*/
+
 
     Scene scene;
 
@@ -1026,11 +1151,15 @@ int main() {
         CSGOperations::run(obj->mesh, scene.selectedObject->mesh, CSGOperations::Operaion::UNION);
         scene.deleteSelected();
     }
-
+    float dt = 0.f;
+    float lastFrame = getCurrentTime();
     // Главный цикл
     while (!glfwWindowShouldClose(window)) {
+        ChangeDeltaTime(dt, lastFrame);
         glClearColor(0.4f, 0.4f, 0.4f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        DoMovement(dt);
 
         // Обновление ImGui
         ImGui_ImplOpenGL3_NewFrame();
@@ -1038,6 +1167,8 @@ int main() {
         ImGui::NewFrame();
         ImGuizmo::BeginFrame();
 
+        glm::mat4 proj = glm::perspective(glm::radians(camera.GetZoom()), static_cast<float>(Width) / Height, zNear, zFar);
+        glm::mat4 view = camera.GetViewMatrix();
 
         // Окно редактора
         ImGui::Begin("CSG Editor");

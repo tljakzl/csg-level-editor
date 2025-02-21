@@ -17,6 +17,7 @@ include_directories(lib/json/include)
 
 add_executable(editor
     src/main.cpp
+    src/Camera.cpp
     lib/imgui/backends/imgui_impl_glfw.cpp
     lib/imgui/backends/imgui_impl_opengl3.cpp
     lib/ImGuizmo/ImGuizmo.cpp
