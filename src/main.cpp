@@ -21,6 +21,7 @@
 #include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
 #include <CGAL/Polygon_mesh_processing/corefinement.h>
 //#include <CGAL/Polygon_mesh_processing/boolean_operations.h>
+#include <CGAL/Polygon_mesh_processing/clip.h>
 #include <CGAL/Bbox_3.h>
 #include <vector>
 #include <iostream>
@@ -34,6 +35,11 @@
 typedef CGAL::Simple_cartesian<double> Kernel;
 typedef CGAL::Surface_mesh<Kernel::Point_3> CGAL_Mesh;
 namespace PMP = CGAL::Polygon_mesh_processing;
+
+glm::vec3 lightPosition(4);
+glm::vec3 lightColor(1);
+glm::vec3 viewPosison(5);
+bool draw_debug_normals = false;
 
 // Шейдеры (встроенные в код для простоты)
 static const char* default_vs = R"(
@@ -207,10 +213,6 @@ static GLuint CompileShader(const char* vertexShader, const char* fragmentShader
 
     return prog;
 };
-
-glm::vec3 lightPosition(4);
-glm::vec3 lightColor(1);
-glm::vec3 viewPosison(5);
 
 // Класс слоя сцены
 class SceneLayer {
@@ -638,6 +640,7 @@ public:
             }
 
             if (success) {
+                PMP::remove_degenerate_faces(result);
                 A.cgal_mesh = std::move(result);
                 applyTransform(A.cgal_mesh, glm::inverse(A.transform));
                 A.uploadToGPU();
@@ -660,13 +663,6 @@ private:
         }
     }
 };
-
-
-// Прототипы функций
-GLFWwindow* initGLFW();
-void initImGui(GLFWwindow* window);
-void createCube(Mesh& mesh, float size = 1.0f);
-void handleGizmo(SceneObject& obj, const glm::mat4& view, const glm::mat4& proj);
 
 void handleObjectSelection(Scene& scene, GLFWwindow* window,
     const glm::mat4& view, const glm::mat4& projection) {
@@ -806,6 +802,10 @@ void drawPropertiesWindow(Scene& scene) {
 
         ImGui::SameLine();
         ImGui::Checkbox("Visible", &obj.mesh.visible);
+        if(ImGui::Button("Flip normals"))
+        {
+            obj.mesh.flipNormals();
+        }
 
         // Выбор слоя
         int layer = scene.selectedObject->layer;
@@ -850,178 +850,6 @@ void drawPropertiesWindow(Scene& scene) {
     ImGui::End();
 }
 
-int main() {
-    GLFWwindow* window = initGLFW();
-    initImGui(window);
-    glEnable(GL_CULL_FACE);
-    //glCullFace(GL_FRONT);
-    // Камера
-    glm::mat4 view = glm::lookAt(
-        viewPosison, 
-        glm::vec3(0,0,0), 
-        glm::vec3(0,1,0)
-    );
-    glm::mat4 proj = glm::perspective(
-        glm::radians(45.0f), 
-        1280.0f/720.0f, 
-        0.1f, 
-        100.0f
-    );
-
-    Scene scene;
-
-    auto shader_id = CompileShader(default_vs, default_fs);
-    auto debug_normals_shader_id = CompileShader(debug_normals_vs, debug_normals_fs, debug_normals_gs);
-    // Рендеринг
-
-// Обновлённый рендеринг с учётом слоёв
-    auto renderScene = [&](const glm::mat4& view, const glm::mat4& proj) {
-        for (auto& layer : scene.layers) {
-            if (!layer.visible) continue;
-
-            for (auto& obj : scene.objects) {
-                if (obj->layer != &layer - &scene.layers[0]) continue;
-                if (!obj->mesh.visible) continue;
-
-                glUseProgram(shader_id);
-                obj->mesh.render(view, proj, shader_id);
-                glUseProgram(debug_normals_shader_id);
-                obj->mesh.render(view, proj, debug_normals_shader_id);
-            }
-        }
-    };
-
-    {
-        Mesh cube1;
-        createCube(cube1);
-        cube1.flipNormals();
-        cube1.color = glm::vec3(0.8f, 0.2f, 0.3f);
-        auto obj = scene.addObject(std::move(cube1));
-        obj->transform.scale = glm::vec3(3.f);
-        obj->transform.position = glm::vec3(-1.f,0.f, -1.f);
-        obj->updateTransform();
-    
-        Mesh cube2;
-        createCube(cube2);
-        cube2.color = glm::vec3(0.2f, 0.8f, 0.3f);
-        auto obj2 = scene.addObject(std::move(cube2));
-        obj2->transform.scale = glm::vec3(1.f,3.f,1.f);
-        obj2->updateTransform();
-   
-        scene.selectedObject = obj2;
-        CSGOperations::run(obj->mesh, scene.selectedObject->mesh, CSGOperations::Operaion::DIFFERENCE);
-        scene.deleteSelected();
-
-        Mesh cube3;
-        cube3.flipNormals();
-        createCube(cube3);
-        cube3.color = glm::vec3(0.6f, 0.8f, 0.3f);
-        auto obj3 = scene.addObject(std::move(cube3));
-        obj3->transform.position = glm::vec3(0.1f, 1.f, -2.f);
-        obj3->transform.scale = glm::vec3(0.8f, 0.8f, 5.f);
-        obj3->updateTransform();
-
-        scene.selectedObject = obj3;
-        CSGOperations::run(obj->mesh, scene.selectedObject->mesh, CSGOperations::Operaion::UNION);
-        scene.deleteSelected();
-    }
-
-    // Главный цикл
-    while (!glfwWindowShouldClose(window)) {
-        glClearColor(0.4f, 0.4f, 0.4f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        // Обновление ImGui
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-        ImGuizmo::BeginFrame();
-
-
-        // Окно редактора
-        ImGui::Begin("CSG Editor");
-        if (ImGui::Button("Add Cube")) {
-            Mesh cube;
-            createCube(cube);
-            cube.uploadToGPU();
-            cube.color = glm::vec3(0.8f, 0.2f, 0.3f);
-            scene.addObject(std::move(cube));
-        }
-        if (ImGui::Button("Polygon Mode line"))
-        {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        }
-        if (ImGui::Button("Polygon Mode fill"))
-        {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        }
-        ImGui::End();
-
-        // Окно свойств
-        drawPropertiesWindow(scene);
-        drawLayerManager(scene);
-        //drawGroupManager(scene); // Аналогично layer manager
-
-        // Окно вьюпорта
-        ImGui::Begin("Viewport", nullptr, 
-            ImGuiWindowFlags_NoScrollbar | 
-            ImGuiWindowFlags_NoScrollWithMouse);
-
-        // Кнопки CSG
-        ImGui::Begin("CSG Tools");
-        auto run_button = [&](CSGOperations::Operaion operation)
-            {
-                // Для демо - вычитаем первый попавшийся объект
-                for (auto& obj : scene.objects) {
-                    if (obj.get() != scene.selectedObject && !obj->isOperationResult) {
-                        if (CSGOperations::run(obj.get()->mesh, scene.selectedObject->mesh, operation)) {
-                            scene.deleteSelected(); // Удаляем оригиналы
-                            break;
-                        }
-                    }
-                }
-            };
-
-        if (ImGui::Button("Difference") && scene.selectedObject) {
-            run_button(CSGOperations::Operaion::DIFFERENCE);
-        }
-        if (ImGui::Button("Union") && scene.selectedObject) {
-            run_button(CSGOperations::Operaion::UNION);
-        }
-        if (ImGui::Button("Intersection") && scene.selectedObject) {
-            run_button(CSGOperations::Operaion::INTERSECTION);
-        }
-        ImGui::End();
-
-        // Рендеринг
-        
-        if (scene.selectedObject) {
-            handleGizmo(*scene.selectedObject, view, proj);
-        }
-
-        // 2. Проверка: если UI поглотил ввод, пропускаем обработку сцены
-        bool uiWantsInput = ImGui::GetIO().WantCaptureMouse || ImGuizmo::IsUsing();
-        if (!uiWantsInput) {
-            handleObjectSelection(scene, window, view, proj);
-        }
-
-        
-        ImGui::End();
-
-        renderScene(view, proj);
-
-        // Рендеринг ImGui
-        ImGui::Render();
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
-        glfwSwapBuffers(window);
-        glfwPollEvents();
-    }
-
-    glfwTerminate();
-    return 0;
-}
-
 // Инициализация GLFW
 GLFWwindow* initGLFW() {
     glfwInit();
@@ -1049,7 +877,7 @@ void initImGui(GLFWwindow* window) {
 }
 
 // Создание куба
-void createCube(Mesh& mesh, float size) {
+void createCube(Mesh& mesh, float size = 1.f) {
     using Vertex = CGAL_Mesh::Vertex_index;
 
     // Вершины куба (8 точек)
@@ -1118,4 +946,175 @@ void handleGizmo(SceneObject& obj, const glm::mat4& view, const glm::mat4& proj)
         );
         obj.transform.rotation = glm::degrees(glm::eulerAngles(obj.transform.m_orientation));
     }
+}
+
+int main() {
+    GLFWwindow* window = initGLFW();
+    initImGui(window);
+    glEnable(GL_CULL_FACE);
+    //glCullFace(GL_FRONT);
+    // Камера
+    glm::mat4 view = glm::lookAt(
+        viewPosison,
+        glm::vec3(0, 0, 0),
+        glm::vec3(0, 1, 0)
+    );
+    glm::mat4 proj = glm::perspective(
+        glm::radians(45.0f),
+        1280.0f / 720.0f,
+        0.1f,
+        100.0f
+    );
+
+    Scene scene;
+
+    auto shader_id = CompileShader(default_vs, default_fs);
+    auto debug_normals_shader_id = CompileShader(debug_normals_vs, debug_normals_fs, debug_normals_gs);
+    // Рендеринг
+
+// Обновлённый рендеринг с учётом слоёв
+    auto renderScene = [&](const glm::mat4& view, const glm::mat4& proj) {
+        for (auto& layer : scene.layers) {
+            if (!layer.visible) continue;
+
+            for (auto& obj : scene.objects) {
+                if (obj->layer != &layer - &scene.layers[0]) continue;
+                if (!obj->mesh.visible) continue;
+
+                glUseProgram(shader_id);
+                obj->mesh.render(view, proj, shader_id);
+                if (draw_debug_normals)
+                {
+                    glUseProgram(debug_normals_shader_id);
+                    obj->mesh.render(view, proj, debug_normals_shader_id);
+                }
+            }
+        }
+        };
+
+    {
+        Mesh cube1;
+        createCube(cube1);
+        cube1.flipNormals();
+        cube1.color = glm::vec3(0.8f, 0.2f, 0.3f);
+        auto obj = scene.addObject(std::move(cube1));
+        obj->transform.scale = glm::vec3(3.f);
+        obj->transform.position = glm::vec3(-1.f, 0.f, -1.f);
+        obj->updateTransform();
+
+        Mesh cube2;
+        createCube(cube2);
+        cube2.color = glm::vec3(0.2f, 0.8f, 0.3f);
+        auto obj2 = scene.addObject(std::move(cube2));
+        obj2->transform.scale = glm::vec3(1.f, 3.f, 1.f);
+        obj2->updateTransform();
+
+        scene.selectedObject = obj2;
+        CSGOperations::run(obj->mesh, scene.selectedObject->mesh, CSGOperations::Operaion::DIFFERENCE);
+        scene.deleteSelected();
+
+        Mesh cube3;
+        cube3.flipNormals();
+        createCube(cube3);
+        cube3.color = glm::vec3(0.6f, 0.8f, 0.3f);
+        auto obj3 = scene.addObject(std::move(cube3));
+        obj3->transform.position = glm::vec3(0.1f, 1.f, -2.f);
+        obj3->transform.scale = glm::vec3(0.8f, 0.8f, 5.f);
+        obj3->updateTransform();
+
+        scene.selectedObject = obj3;
+        CSGOperations::run(obj->mesh, scene.selectedObject->mesh, CSGOperations::Operaion::UNION);
+        scene.deleteSelected();
+    }
+
+    // Главный цикл
+    while (!glfwWindowShouldClose(window)) {
+        glClearColor(0.4f, 0.4f, 0.4f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // Обновление ImGui
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+        ImGuizmo::BeginFrame();
+
+
+        // Окно редактора
+        ImGui::Begin("CSG Editor");
+        if (ImGui::Button("Add Cube")) {
+            Mesh cube;
+            createCube(cube);
+            cube.uploadToGPU();
+            cube.color = glm::vec3(0.8f, 0.2f, 0.3f);
+            scene.addObject(std::move(cube));
+        }
+        if (ImGui::Button("Polygon Mode line"))
+        {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        }
+        if (ImGui::Button("Polygon Mode fill"))
+        {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
+        if (ImGui::Button("Draw debug normals"))
+        {
+            draw_debug_normals = !draw_debug_normals;
+        }
+        ImGui::End();
+
+        // Окно свойств
+        drawPropertiesWindow(scene);
+        drawLayerManager(scene);
+        //drawGroupManager(scene); // Аналогично layer manager
+
+        // Кнопки CSG
+        ImGui::Begin("CSG Tools");
+        auto run_button = [&](CSGOperations::Operaion operation)
+            {
+                // Для демо - вычитаем первый попавшийся объект
+                for (auto& obj : scene.objects) {
+                    if (obj.get() != scene.selectedObject && !obj->isOperationResult) {
+                        if (CSGOperations::run(obj.get()->mesh, scene.selectedObject->mesh, operation)) {
+                            scene.deleteSelected(); // Удаляем оригиналы
+                            break;
+                        }
+                    }
+                }
+            };
+
+        if (ImGui::Button("Difference") && scene.selectedObject) {
+            run_button(CSGOperations::Operaion::DIFFERENCE);
+        }
+        if (ImGui::Button("Union") && scene.selectedObject) {
+            run_button(CSGOperations::Operaion::UNION);
+        }
+        if (ImGui::Button("Intersection") && scene.selectedObject) {
+            run_button(CSGOperations::Operaion::INTERSECTION);
+        }
+        ImGui::End();
+
+        // Рендеринг
+
+        if (scene.selectedObject) {
+            handleGizmo(*scene.selectedObject, view, proj);
+        }
+
+        // 2. Проверка: если UI поглотил ввод, пропускаем обработку сцены
+        bool uiWantsInput = ImGui::GetIO().WantCaptureMouse || ImGuizmo::IsUsing();
+        if (!uiWantsInput) {
+            handleObjectSelection(scene, window, view, proj);
+        }
+
+        renderScene(view, proj);
+
+        // Рендеринг ImGui
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        glfwSwapBuffers(window);
+        glfwPollEvents();
+    }
+
+    glfwTerminate();
+    return 0;
 }
